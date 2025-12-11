@@ -1,7 +1,8 @@
 # trading-core/requirements.txt
-python-dotenv
-httpx
-supabase
-cryptography
-pandas
-yfinance
+python-dotenv>=1.0.0
+httpx>=0.25.0
+supabase>=2.0.0
+cryptography>=41.0.0
+pandas>=2.0.0
+yfinance>=0.2.0
+numpy>=1.24.0
