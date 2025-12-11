@@ -91,3 +91,39 @@ class DataFetcher:
         
     def _process_ohlcv(self, ohlcv: List) -> List[Dict]:
         """Обработка OHLCV данных"""
+        data = []
+        for candle in ohlcv:
+            data.append({
+                'timestamp': candle[0],
+                'open': float(candle[1]),
+                'high': float(candle[2]),
+                'low': float(candle[3]),
+                'close': float(candle[4]),
+                'volume': float(candle[5]),
+                'time': datetime.fromtimestamp(candle[0] / 1000).isoformat()
+            })
+        return data
+        
+    def _is_cached(self, asset: str) -> bool:
+        """Проверка кэша"""
+        if asset in self.cache:
+            cache_time = self.cache[asset]['timestamp']
+            if (datetime.now() - cache_time).seconds < self.cache_ttl:
+                return True
+        return False
+        
+    def _update_cache(self, asset: str, data: List):
+        """Обновление кэша"""
+        self.cache[asset] = {
+            'timestamp': datetime.now(),
+            'data': data
+        }
+        
+    async def close(self):
+        """Закрытие соединений"""
+        for exchange in self.exchanges.values():
+            try:
+                await exchange.close()
+            except:
+                pass
+        logger.info("🔌 Соединения с биржами закрыты")
