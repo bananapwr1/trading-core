@@ -1,17 +1,7 @@
-# Основные зависимости
-supabase==1.1.2
-python-dotenv==1.0.0
-pandas==2.0.3
-numpy==1.24.3
-ccxt==4.1.59
-
-# AI и HTTP
-aiohttp==3.9.1
-requests==2.31.0
-
-# Утилиты
-pytz==2024.1
-python-dateutil==2.8.2
-
-# Логирование
-structlog==23.2.0
+# trading-core/requirements.txt
+python-dotenv
+httpx
+supabase-py
+cryptography
+pandas
+yfinance
