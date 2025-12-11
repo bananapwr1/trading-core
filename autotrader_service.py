@@ -12,7 +12,7 @@ from pocket_option_api import PocketOptionAPI
 logger = logging.getLogger(__name__)
 
 # URL API-сервера на Bothost
-BOTHOST_UI_API_URL = os.getenv("BOTHOST_UI_API_URL")
+BOTHOST_UI_API_URL = os.getenv("API_ENDPOINT")
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
 
 
@@ -22,7 +22,7 @@ async def get_encrypted_credentials(user_id: int) -> Optional[Dict[str, str]]:
     логин/пароль пользователя PO.
     """
     if not BOTHOST_UI_API_URL:
-        logger.error("🚫 Переменная BOTHOST_UI_API_URL не задана!")
+        logger.error("🚫 Переменная API_ENDPOINT не задана в настройках окружения!")
         return None
 
     api_endpoint = f"{BOTHOST_UI_API_URL}/get_po_credentials"
