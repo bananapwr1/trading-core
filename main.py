@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 
 # Импорт наших сервисов
 from autotrader_service import execute_auto_trade
+from data_aggregator import DataAggregator
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -80,8 +81,27 @@ class TradingCore:
                 
                 self.supabase = None
 
+        # Дефолтная стратегия (используется когда нет активной в БД)
+        self.default_strategy = {
+            'name': 'Default RSI Strategy',
+            'description': 'Базовая стратегия на основе RSI индикатора',
+            'allow_trading': False,  # По умолчанию только мониторинг, НЕ торговля
+            'rsi_period': 14,
+            'rsi_oversold': 30,
+            'rsi_overbought': 70,
+            'default_amount': 10.0,
+            'default_timeframe': 60,
+            'assets_to_monitor': [DEFAULT_ASSET]
+        }
+        
         self.current_strategy = None
         self.monitored_assets = [DEFAULT_ASSET]
+        self.using_default_strategy = False
+        
+        # Инициализация агрегатора данных
+        self.data_aggregator = DataAggregator(self.supabase)
+        self.aggregation_counter = 0  # Счетчик для периодической агрегации
+        self.aggregation_interval = 6  # Агрегировать каждые N циклов
 
     async def test_supabase_connection(self) -> bool:
         """Проверяет соединение с Supabase при старте приложения."""
@@ -150,28 +170,65 @@ class TradingCore:
     async def fetch_strategy(self):
         """Читает активный алгоритм из Supabase (задается Admin Bot)."""
         if not self.supabase:
-            logger.debug("Supabase client not initialized, skipping strategy fetch.")
+            logger.debug("Supabase client not initialized, using default strategy.")
+            self._activate_default_strategy()
             return
 
         try:
-            # Читаем последнюю активную стратегию
+            # Читаем последнюю активную стратегию из БД
             response = self.supabase.table("strategy_settings").select("*").eq("is_active", True).limit(1).execute()
 
             if response.data:
                 strategy = response.data[0]
                 self.current_strategy = strategy
                 self.monitored_assets = strategy.get('assets_to_monitor', [DEFAULT_ASSET])
-                logger.info(f"✨ Fetched active strategy: {strategy.get('name', 'Unnamed')}. Monitoring {self.monitored_assets}")
+                self.using_default_strategy = False
+                logger.info(f"✨ Активна стратегия из БД: '{strategy.get('name', 'Unnamed')}'. Активы: {self.monitored_assets}")
             else:
-                self.current_strategy = None
-                self.monitored_assets = [DEFAULT_ASSET]
-                logger.warning("⚠️ No active strategy found. Using default asset.")
+                # Нет активной стратегии в БД - используем дефолтную
+                self._activate_default_strategy()
+                logger.info(f"📋 Активна дефолтная стратегия: '{self.default_strategy['name']}' (Admin Bot еще не настроил стратегию)")
+                
         except Exception as e:
-            logger.warning(f"⚠️ Could not fetch strategy from Supabase (table may not exist yet): {e}")
+            logger.warning(f"⚠️ Не удалось загрузить стратегию из Supabase (возможно, таблица еще не создана): {e}")
             logger.debug(f"Stack trace:\n{traceback.format_exc()}")
-            logger.info("📍 Continuing with default settings...")
-            self.current_strategy = None
-            self.monitored_assets = [DEFAULT_ASSET]
+            self._activate_default_strategy()
+            logger.info(f"📍 Используется дефолтная стратегия: '{self.default_strategy['name']}'")
+
+    def _activate_default_strategy(self):
+        """Активирует встроенную дефолтную стратегию."""
+        self.current_strategy = self.default_strategy
+        self.monitored_assets = self.default_strategy['assets_to_monitor']
+        self.using_default_strategy = True
+
+    async def aggregate_market_data(self, market_data: Dict[str, pd.DataFrame]):
+        """
+        Агрегирует и анализирует рыночные данные, сохраняет статистику в БД.
+        
+        Args:
+            market_data: Словарь с рыночными данными по активам
+        """
+        if not market_data:
+            logger.debug("Нет рыночных данных для агрегации")
+            return
+        
+        try:
+            for asset, df in market_data.items():
+                if df is None or df.empty:
+                    continue
+                
+                # Обрабатываем и сохраняем агрегированные данные
+                await self.data_aggregator.process_and_save(
+                    asset=asset.replace('=X', ''),  # Убираем суффиксы
+                    market_data=df,
+                    periods=['daily']  # Пока только дневная агрегация
+                )
+                
+            logger.info("✅ Агрегация данных завершена")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка при агрегации данных: {e}")
+            logger.debug(f"Stack trace:\n{traceback.format_exc()}")
 
     async def fetch_market_data(self) -> Dict[str, pd.DataFrame]:
         """Получает текущие данные по активам."""
@@ -246,150 +303,121 @@ class TradingCore:
             return pd.Series(dtype=float)
 
     def apply_algorithm(self, market_data: Dict[str, pd.DataFrame]) -> List[Dict[str, Any]]:
-        """Применяет чистый алгоритм (стратегию) и генерирует целевые сигналы."""
+        """Применяет алгоритм (стратегию) и генерирует целевые сигналы."""
         signals = []
 
         if not market_data:
             logger.debug("No market data available for analysis.")
             return signals
 
-        # Если нет стратегии, используем минимальный RSI-алгоритм
         if not self.current_strategy:
-            # Логика минимального RSI-анализа
-            for asset, df in market_data.items():
-                try:
-                    # Валидация данных
-                    if df is None or df.empty:
-                        logger.debug(f"Empty data for {asset}, skipping.")
-                        continue
-                    
-                    if len(df) < 20:
-                        logger.debug(f"Insufficient data for {asset}: {len(df)} points (need 20+)")
-                        continue
-                    
-                    # Проверяем наличие колонки Close
-                    if 'Close' not in df.columns:
-                        logger.warning(f"⚠️ 'Close' column not found for {asset}. Available columns: {list(df.columns)}")
-                        continue
-
-                    # Вычисляем RSI
-                    rsi = self.calculate_rsi(df['Close'])
-                    
-                    if rsi is None or rsi.empty or len(rsi) == 0:
-                        logger.debug(f"RSI calculation returned no data for {asset}")
-                        continue
-                    
-                    current_rsi = rsi.iloc[-1]
-
-                    if pd.isna(current_rsi):
-                        logger.debug(f"Current RSI is NaN for {asset}")
-                        continue
-                except KeyError as e:
-                    logger.warning(f"⚠️ Column access error for {asset}: {e}")
-                    continue
-                except Exception as e:
-                    logger.error(f"❌ Error processing {asset} in apply_algorithm: {e}")
-                    logger.debug(f"Stack trace:\n{traceback.format_exc()}")
-                    continue
-
-                # Генерация сигналов на основе RSI
-                if current_rsi < 30:  # Перепроданность
-                    signals.append({
-                        "asset": asset.replace('=X', ''),
-                        "direction": "CALL",
-                        "amount": 10.0,
-                        "timeframe": 60,
-                        "indicator": "RSI",
-                        "value": float(current_rsi)
-                    })
-                    logger.info(f"📈 CALL signal for {asset}: RSI={current_rsi:.2f}")
-                elif current_rsi > 70:  # Перекупленность
-                    signals.append({
-                        "asset": asset.replace('=X', ''),
-                        "direction": "PUT",
-                        "amount": 10.0,
-                        "timeframe": 60,
-                        "indicator": "RSI",
-                        "value": float(current_rsi)
-                    })
-                    logger.info(f"📉 PUT signal for {asset}: RSI={current_rsi:.2f}")
-
+            logger.error("⚠️ КРИТИЧЕСКАЯ ОШИБКА: current_strategy не инициализирована!")
             return signals
 
-        # *** РЕАЛЬНАЯ ЛОГИКА: Применение кастомной стратегии ***
-        logger.info(f"Applying custom algorithm from strategy: {self.current_strategy.get('name')}")
+        # Получаем параметры из текущей стратегии (дефолтной или из БД)
+        strategy_name = self.current_strategy.get('name', 'Unknown')
+        allow_trading = self.current_strategy.get('allow_trading', False)
+        default_amount = self.current_strategy.get('default_amount', 10.0)
+        default_timeframe = self.current_strategy.get('default_timeframe', 60)
+        rsi_period = self.current_strategy.get('rsi_period', 14)
+        rsi_oversold = self.current_strategy.get('rsi_oversold', 30)
+        rsi_overbought = self.current_strategy.get('rsi_overbought', 70)
 
-        if self.current_strategy and self.current_strategy.get('allow_trading', False):
-            default_amount = self.current_strategy.get('default_amount', 10.0)
-            default_timeframe = self.current_strategy.get('default_timeframe', 60)
+        # Логирование режима работы
+        if self.using_default_strategy:
+            logger.info(f"🔍 Применяется дефолтная стратегия '{strategy_name}' (режим: {'торговля' if allow_trading else 'мониторинг'})")
+        else:
+            logger.info(f"✨ Применяется стратегия из БД '{strategy_name}' (режим: {'торговля' if allow_trading else 'мониторинг'})")
 
-            for asset, df in market_data.items():
-                try:
-                    # Валидация данных
-                    if df is None or df.empty:
-                        logger.debug(f"Empty data for {asset}, skipping.")
-                        continue
-                    
-                    if len(df) < 20:
-                        logger.debug(f"Insufficient data for {asset}: {len(df)} points (need 20+)")
-                        continue
-                    
-                    # Проверяем наличие колонки Close
-                    if 'Close' not in df.columns:
-                        logger.warning(f"⚠️ 'Close' column not found for {asset}. Available columns: {list(df.columns)}")
-                        continue
-
-                    # Применяем RSI из стратегии
-                    rsi_period = self.current_strategy.get('rsi_period', 14)
-                    rsi_oversold = self.current_strategy.get('rsi_oversold', 30)
-                    rsi_overbought = self.current_strategy.get('rsi_overbought', 70)
-
-                    rsi = self.calculate_rsi(df['Close'], period=rsi_period)
-                    
-                    if rsi is None or rsi.empty or len(rsi) == 0:
-                        logger.debug(f"RSI calculation returned no data for {asset}")
-                        continue
-                    
-                    current_rsi = rsi.iloc[-1]
-
-                    if pd.isna(current_rsi):
-                        logger.debug(f"Current RSI is NaN for {asset}")
-                        continue
-                except KeyError as e:
-                    logger.warning(f"⚠️ Column access error for {asset}: {e}")
+        # Единая логика для всех стратегий (дефолтной и кастомных)
+        for asset, df in market_data.items():
+            try:
+                # Валидация данных
+                if df is None or df.empty:
+                    logger.debug(f"Empty data for {asset}, skipping.")
                     continue
-                except Exception as e:
-                    logger.error(f"❌ Error processing {asset} with custom strategy: {e}")
-                    logger.debug(f"Stack trace:\n{traceback.format_exc()}")
+                
+                if len(df) < 20:
+                    logger.debug(f"Insufficient data for {asset}: {len(df)} points (need 20+)")
+                    continue
+                
+                # Проверяем наличие колонки Close
+                if 'Close' not in df.columns:
+                    logger.warning(f"⚠️ 'Close' column not found for {asset}. Available columns: {list(df.columns)}")
                     continue
 
-                # Генерация сигналов на основе параметров стратегии
-                if current_rsi < rsi_oversold:
-                    signals.append({
-                        "asset": asset.replace('=X', ''),
-                        "direction": "CALL",
-                        "amount": default_amount,
-                        "timeframe": default_timeframe,
-                        "indicator": "RSI",
-                        "value": float(current_rsi)
-                    })
-                elif current_rsi > rsi_overbought:
-                    signals.append({
-                        "asset": asset.replace('=X', ''),
-                        "direction": "PUT",
-                        "amount": default_amount,
-                        "timeframe": default_timeframe,
-                        "indicator": "RSI",
-                        "value": float(current_rsi)
-                    })
+                # Вычисляем RSI
+                rsi = self.calculate_rsi(df['Close'], period=rsi_period)
+                
+                if rsi is None or rsi.empty or len(rsi) == 0:
+                    logger.debug(f"RSI calculation returned no data for {asset}")
+                    continue
+                
+                current_rsi = rsi.iloc[-1]
 
-        logger.info(f"Generated {len(signals)} TARGET signals based on strategy.")
+                if pd.isna(current_rsi):
+                    logger.debug(f"Current RSI is NaN for {asset}")
+                    continue
+                    
+            except KeyError as e:
+                logger.warning(f"⚠️ Column access error for {asset}: {e}")
+                continue
+            except Exception as e:
+                logger.error(f"❌ Error processing {asset}: {e}")
+                logger.debug(f"Stack trace:\n{traceback.format_exc()}")
+                continue
+
+            # Генерация сигналов на основе RSI
+            signal_generated = False
+            
+            if current_rsi < rsi_oversold:  # Перепроданность
+                signals.append({
+                    "asset": asset.replace('=X', ''),
+                    "direction": "CALL",
+                    "amount": default_amount,
+                    "timeframe": default_timeframe,
+                    "indicator": "RSI",
+                    "value": float(current_rsi),
+                    "strategy": strategy_name
+                })
+                logger.info(f"📈 CALL сигнал для {asset}: RSI={current_rsi:.2f} (< {rsi_oversold})")
+                signal_generated = True
+                
+            elif current_rsi > rsi_overbought:  # Перекупленность
+                signals.append({
+                    "asset": asset.replace('=X', ''),
+                    "direction": "PUT",
+                    "amount": default_amount,
+                    "timeframe": default_timeframe,
+                    "indicator": "RSI",
+                    "value": float(current_rsi),
+                    "strategy": strategy_name
+                })
+                logger.info(f"📉 PUT сигнал для {asset}: RSI={current_rsi:.2f} (> {rsi_overbought})")
+                signal_generated = True
+
+            if not signal_generated:
+                logger.debug(f"📊 {asset}: RSI={current_rsi:.2f} (норма, сигналов нет)")
+
+        # Итоговое логирование
+        if signals:
+            logger.info(f"✅ Сгенерировано {len(signals)} сигнал(ов) по стратегии '{strategy_name}'")
+            if not allow_trading:
+                logger.warning(f"⚠️ ТОРГОВЛЯ ВЫКЛЮЧЕНА (allow_trading=False). Сигналы только для мониторинга!")
+        else:
+            logger.info(f"📊 Сигналы не сгенерированы (рыночные условия не соответствуют стратегии)")
+            
         return signals
 
     async def check_and_execute_trades(self, signals: List[Dict[str, Any]]):
         """Проверяет Supabase на наличие пользовательских запросов (от UI-Бота) и выполняет торговлю."""
         if not self.supabase:
             logger.debug("Supabase client not initialized, skipping trade execution.")
+            return
+
+        # Проверяем, разрешена ли торговля текущей стратегией
+        if not self.current_strategy or not self.current_strategy.get('allow_trading', False):
+            logger.debug("⚠️ Торговля отключена в текущей стратегии. Пропускаем выполнение сделок.")
             return
 
         # Получаем ожидающие запросы, которые должны быть обработаны Ядром
@@ -406,6 +434,8 @@ class TradingCore:
             logger.debug("No pending signal requests found.")
             return
 
+        logger.info(f"💼 Найдено {len(pending_requests)} запрос(ов) на торговлю")
+
         for req in pending_requests:
             user_id = req.get('user_id')
             request_id = req.get('id')
@@ -415,11 +445,12 @@ class TradingCore:
                 continue
 
             if not signals:
-                logger.warning(f"Trade skipped for user {user_id}: No target signals generated in this cycle.")
+                logger.warning(f"Торговля пропущена для пользователя {user_id}: Нет сигналов в этом цикле.")
                 continue
 
             # Берем первый сгенерированный целевой сигнал
             target_signal = signals[0]
+            logger.info(f"🎯 Выполнение сделки для пользователя {user_id}: {target_signal['direction']} {target_signal['asset']}")
 
             # Вызываем сервис автоторговли (HTTP-запрос к UI-Bot)
             try:
@@ -433,14 +464,22 @@ class TradingCore:
             new_status = "executed" if trade_success else "failed"
             try:
                 self.supabase.table("signal_requests").update({"status": new_status}).eq("id", request_id).execute()
-                logger.info(f"✅ Updated request {request_id} status to '{new_status}'")
+                logger.info(f"✅ Запрос {request_id} обновлен: статус '{new_status}'")
             except Exception as e:
                 logger.error(f"❌ Error updating request status for {request_id}: {e}")
                 logger.debug(f"Stack trace:\n{traceback.format_exc()}")
 
     async def run(self):
         """Главный цикл Ядра."""
-        logger.info("Core starting up...")
+        logger.info("🚀 Trading Core (Bot-1) запускается...")
+        logger.info("=" * 60)
+        logger.info(f"📋 Дефолтная стратегия: '{self.default_strategy['name']}'")
+        logger.info(f"   - Режим: {'Торговля' if self.default_strategy['allow_trading'] else 'Мониторинг (торговля отключена)'}")
+        logger.info(f"   - RSI период: {self.default_strategy['rsi_period']}")
+        logger.info(f"   - RSI перепродан: < {self.default_strategy['rsi_oversold']}")
+        logger.info(f"   - RSI перекуплен: > {self.default_strategy['rsi_overbought']}")
+        logger.info(f"   - Активы: {self.default_strategy['assets_to_monitor']}")
+        logger.info("=" * 60)
         
         # Проверяем соединение с Supabase при старте
         await self.test_supabase_connection()
@@ -456,20 +495,27 @@ class TradingCore:
                 # 2. Сбор данных
                 market_data = await self.fetch_market_data()
 
-                # 3. Применение алгоритма и генерация целевых сигналов
+                # 3. Агрегация и анализ данных (периодически)
+                self.aggregation_counter += 1
+                if self.aggregation_counter >= self.aggregation_interval:
+                    logger.info("📊 Запуск агрегации и анализа рыночных данных...")
+                    await self.aggregate_market_data(market_data)
+                    self.aggregation_counter = 0
+
+                # 4. Применение алгоритма и генерация целевых сигналов
                 signals = self.apply_algorithm(market_data)
 
-                # 4. Выполнение торговли (если есть запросы)
+                # 5. Выполнение торговли (если есть запросы)
                 await self.check_and_execute_trades(signals)
 
                 elapsed = time.time() - start_time
                 sleep_time = max(0, ANALYSIS_INTERVAL - elapsed)
-                logger.info(f"✅ Cycle completed in {elapsed:.2f}s. Sleeping for {sleep_time:.2f}s...")
+                logger.info(f"✅ Цикл завершен за {elapsed:.2f}с. Ожидание {sleep_time:.2f}с...")
 
             except Exception as e:
-                logger.error(f"❌ Critical error in main cycle: {e}")
+                logger.error(f"❌ Критическая ошибка в главном цикле: {e}")
                 logger.error(f"Stack trace:\n{traceback.format_exc()}")
-                logger.info("📍 Continuing to next cycle despite error...")
+                logger.info("📍 Продолжаем работу несмотря на ошибку...")
                 sleep_time = ANALYSIS_INTERVAL
 
             await asyncio.sleep(sleep_time)
