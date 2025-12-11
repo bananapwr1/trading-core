@@ -170,4 +170,5 @@ class TradingCore:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    core = TradingCore()
+    asyncio.run(core.run())

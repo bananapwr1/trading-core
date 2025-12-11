@@ -5,8 +5,8 @@ import logging
 from typing import Dict, Any, Optional
 
 # Импортируем модули, которые будут использоваться в main.py
-from .crypto_utils import decrypt_data 
-from .pocket_option_api import PocketOptionAPI 
+from crypto_utils import decrypt_data 
+from pocket_option_api import PocketOptionAPI 
 
 logger = logging.getLogger(__name__)
 
