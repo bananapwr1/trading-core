@@ -63,7 +63,7 @@ class TradingCore:
             try:
                 # Получаем последние 50 точек за 1 минуту
                 logger.info(f"📊 Fetching market data for {asset}...")
-                data = yf.download(asset, period="5h", interval="1m", progress=False)
+                data = yf.download(asset, period="1d", interval="1m", progress=False)
                 if not data.empty:
                     market_data[asset] = data
                     logger.info(f"✅ Fetched {len(data)} data points for {asset}")
