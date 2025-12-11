@@ -104,42 +104,114 @@ class TradingCore:
                 # Получаем последние 50 точек за 1 минуту
                 logger.info(f"📊 Fetching market data for {asset}...")
                 data = yf.download(asset, period="1d", interval="1m", progress=False)
-                if not data.empty:
-                    market_data[asset] = data
-                    logger.info(f"✅ Fetched {len(data)} data points for {asset}")
-                else:
+                
+                if data is None or data.empty:
                     logger.warning(f"⚠️ No data received for {asset}")
+                    continue
+                
+                # Обработка MultiIndex columns от yfinance
+                # yfinance иногда возвращает MultiIndex когда запрашивается один актив
+                if isinstance(data.columns, pd.MultiIndex):
+                    logger.debug(f"MultiIndex columns detected for {asset}, flattening...")
+                    data.columns = data.columns.get_level_values(0)
+                
+                # Проверяем наличие обязательных колонок
+                required_columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+                missing_columns = [col for col in required_columns if col not in data.columns]
+                
+                if missing_columns:
+                    logger.warning(f"⚠️ Missing columns for {asset}: {missing_columns}")
+                    continue
+                
+                # Удаляем строки с NaN в колонке Close
+                data = data.dropna(subset=['Close'])
+                
+                if len(data) == 0:
+                    logger.warning(f"⚠️ No valid data points for {asset} after cleaning")
+                    continue
+                
+                market_data[asset] = data
+                logger.info(f"✅ Fetched {len(data)} valid data points for {asset}")
+                
             except Exception as e:
                 logger.error(f"❌ Error fetching {asset}: {e}")
+                logger.debug(f"Stack trace:\n{traceback.format_exc()}")
 
         return market_data
 
     def calculate_rsi(self, prices: pd.Series, period: int = 14) -> pd.Series:
         """Вычисляет RSI индикатор."""
-        delta = prices.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+        try:
+            # Валидация входных данных
+            if prices is None or len(prices) == 0:
+                logger.warning("⚠️ Empty prices series provided to calculate_rsi")
+                return pd.Series(dtype=float)
+            
+            if len(prices) < period + 1:
+                logger.debug(f"Insufficient data for RSI calculation: {len(prices)} points (need {period + 1}+)")
+                return pd.Series(dtype=float)
+            
+            # Расчет RSI
+            delta = prices.diff()
+            gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
 
-        rs = gain / loss
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
+            # Защита от деления на ноль
+            rs = gain / loss.replace(0, pd.NA)
+            rsi = 100 - (100 / (1 + rs))
+            
+            return rsi
+            
+        except Exception as e:
+            logger.error(f"❌ Error calculating RSI: {e}")
+            logger.debug(f"Stack trace:\n{traceback.format_exc()}")
+            return pd.Series(dtype=float)
 
     def apply_algorithm(self, market_data: Dict[str, pd.DataFrame]) -> List[Dict[str, Any]]:
         """Применяет чистый алгоритм (стратегию) и генерирует целевые сигналы."""
         signals = []
 
+        if not market_data:
+            logger.debug("No market data available for analysis.")
+            return signals
+
         # Если нет стратегии, используем минимальный RSI-алгоритм
         if not self.current_strategy:
             # Логика минимального RSI-анализа
             for asset, df in market_data.items():
-                if len(df) < 20:
+                try:
+                    # Валидация данных
+                    if df is None or df.empty:
+                        logger.debug(f"Empty data for {asset}, skipping.")
+                        continue
+                    
+                    if len(df) < 20:
+                        logger.debug(f"Insufficient data for {asset}: {len(df)} points (need 20+)")
+                        continue
+                    
+                    # Проверяем наличие колонки Close
+                    if 'Close' not in df.columns:
+                        logger.warning(f"⚠️ 'Close' column not found for {asset}. Available columns: {list(df.columns)}")
+                        continue
+
+                    # Вычисляем RSI
+                    rsi = self.calculate_rsi(df['Close'])
+                    
+                    if rsi is None or rsi.empty or len(rsi) == 0:
+                        logger.debug(f"RSI calculation returned no data for {asset}")
+                        continue
+                    
+                    current_rsi = rsi.iloc[-1]
+
+                    if pd.isna(current_rsi):
+                        logger.debug(f"Current RSI is NaN for {asset}")
+                        continue
+                except KeyError as e:
+                    logger.warning(f"⚠️ Column access error for {asset}: {e}")
                     continue
-
-                # Вычисляем RSI
-                rsi = self.calculate_rsi(df['Close'])
-                current_rsi = rsi.iloc[-1]
-
-                if pd.isna(current_rsi):
+                except Exception as e:
+                    logger.error(f"❌ Error processing {asset} in apply_algorithm: {e}")
+                    logger.debug(f"Stack trace:\n{traceback.format_exc()}")
                     continue
 
                 # Генерация сигналов на основе RSI
@@ -174,18 +246,43 @@ class TradingCore:
             default_timeframe = self.current_strategy.get('default_timeframe', 60)
 
             for asset, df in market_data.items():
-                if len(df) < 20:
+                try:
+                    # Валидация данных
+                    if df is None or df.empty:
+                        logger.debug(f"Empty data for {asset}, skipping.")
+                        continue
+                    
+                    if len(df) < 20:
+                        logger.debug(f"Insufficient data for {asset}: {len(df)} points (need 20+)")
+                        continue
+                    
+                    # Проверяем наличие колонки Close
+                    if 'Close' not in df.columns:
+                        logger.warning(f"⚠️ 'Close' column not found for {asset}. Available columns: {list(df.columns)}")
+                        continue
+
+                    # Применяем RSI из стратегии
+                    rsi_period = self.current_strategy.get('rsi_period', 14)
+                    rsi_oversold = self.current_strategy.get('rsi_oversold', 30)
+                    rsi_overbought = self.current_strategy.get('rsi_overbought', 70)
+
+                    rsi = self.calculate_rsi(df['Close'], period=rsi_period)
+                    
+                    if rsi is None or rsi.empty or len(rsi) == 0:
+                        logger.debug(f"RSI calculation returned no data for {asset}")
+                        continue
+                    
+                    current_rsi = rsi.iloc[-1]
+
+                    if pd.isna(current_rsi):
+                        logger.debug(f"Current RSI is NaN for {asset}")
+                        continue
+                except KeyError as e:
+                    logger.warning(f"⚠️ Column access error for {asset}: {e}")
                     continue
-
-                # Применяем RSI из стратегии
-                rsi_period = self.current_strategy.get('rsi_period', 14)
-                rsi_oversold = self.current_strategy.get('rsi_oversold', 30)
-                rsi_overbought = self.current_strategy.get('rsi_overbought', 70)
-
-                rsi = self.calculate_rsi(df['Close'], period=rsi_period)
-                current_rsi = rsi.iloc[-1]
-
-                if pd.isna(current_rsi):
+                except Exception as e:
+                    logger.error(f"❌ Error processing {asset} with custom strategy: {e}")
+                    logger.debug(f"Stack trace:\n{traceback.format_exc()}")
                     continue
 
                 # Генерация сигналов на основе параметров стратегии
