@@ -2,6 +2,7 @@
 import os
 import httpx
 import logging
+import traceback
 from typing import Dict, Any, Optional
 from datetime import datetime
 
@@ -58,9 +59,11 @@ async def get_encrypted_credentials(user_id: int) -> Optional[Dict[str, str]]:
 
     except httpx.RequestError as e:
         logger.error(f"❌ Ошибка соединения или таймаута с UI-Bot Bothost: {e}")
+        logger.debug(f"Stack trace:\n{traceback.format_exc()}")
         return None
     except Exception as e:
         logger.error(f"❌ Неизвестная ошибка при запросе к UI-Bot: {e}")
+        logger.error(f"Stack trace:\n{traceback.format_exc()}")
         return None
 
 
@@ -86,6 +89,7 @@ async def execute_auto_trade(user_id: int, signal: Dict[str, Any], supabase_clie
 
     except Exception as e:
         logger.error(f"❌ Ошибка дешифровки для {user_id}: {e}")
+        logger.error(f"Stack trace:\n{traceback.format_exc()}")
         return False
 
     # 3. Подключение и Торговля
@@ -109,25 +113,31 @@ async def execute_auto_trade(user_id: int, signal: Dict[str, Any], supabase_clie
 
         if trade_result and trade_result.get("status") != "error":
             # Логирование успешной сделки в Supabase (таблица 'trades')
-            supabase_client.table("trades").insert({
-                'user_id': user_id,
-                'trade_id': trade_result.get('trade_id'),
-                'asset': signal['asset'],
-                'direction': signal['direction'],
-                'status': 'open',
-                'amount': signal.get('amount', 10.0),
-                'timeframe': signal.get('timeframe', 60),
-                'created_at': datetime.utcnow().isoformat()
-            }).execute()
-
-            logger.info(f"✅ Trade placed and logged: {trade_result.get('trade_id')}")
+            try:
+                supabase_client.table("trades").insert({
+                    'user_id': user_id,
+                    'trade_id': trade_result.get('trade_id'),
+                    'asset': signal['asset'],
+                    'direction': signal['direction'],
+                    'status': 'open',
+                    'amount': signal.get('amount', 10.0),
+                    'timeframe': signal.get('timeframe', 60),
+                    'created_at': datetime.utcnow().isoformat()
+                }).execute()
+                logger.info(f"✅ Trade placed and logged to Supabase: {trade_result.get('trade_id')}")
+            except Exception as e:
+                logger.warning(f"⚠️ Trade placed but could not log to Supabase (table may not exist): {e}")
+                logger.debug(f"Stack trace:\n{traceback.format_exc()}")
+                logger.info(f"✅ Trade ID: {trade_result.get('trade_id')} (not logged to DB)")
+            
             return True
         else:
-            logger.warning(f"Trade failed on PO for {user_id}.")
+            logger.warning(f"Trade failed on PO for user {user_id}.")
             return False
 
     except Exception as e:
         logger.error(f"❌ Критическая ошибка торговли для {user_id}: {e}")
+        logger.error(f"Stack trace:\n{traceback.format_exc()}")
         return False
     finally:
         if po_api:
