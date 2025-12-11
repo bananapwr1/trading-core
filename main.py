@@ -18,8 +18,9 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # --- Переменные окружения ---
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+# КРИТИЧНО: Очищаем ключи от пробелов - частая причина ошибки 401!
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip() if os.getenv("SUPABASE_URL") else None
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip() if os.getenv("SUPABASE_SERVICE_ROLE_KEY") else None
 ANALYSIS_INTERVAL = int(os.getenv("ANALYSIS_INTERVAL", 10))
 DEFAULT_ASSET = os.getenv("DEFAULT_ASSET", "EURUSD=X")
 
@@ -39,11 +40,44 @@ class TradingCore:
             self.supabase: Optional[Client] = None
         else:
             try:
+                # Дополнительная валидация перед созданием клиента
+                logger.info(f"🔍 Инициализация Supabase клиента...")
+                logger.debug(f"   URL: {SUPABASE_URL}")
+                logger.debug(f"   Key length: {len(SUPABASE_KEY)} chars")
+                logger.debug(f"   Key starts with: {SUPABASE_KEY[:10]}...")
+                
+                # Проверка формата ключа
+                if not SUPABASE_KEY.startswith("eyJ"):
+                    logger.warning("⚠️ ВНИМАНИЕ: Service Role Key обычно начинается с 'eyJ'")
+                    logger.warning("   Убедитесь, что вы используете service_role key, а НЕ anon key!")
+                
+                if SUPABASE_KEY.count('.') < 2:
+                    logger.warning("⚠️ ВНИМАНИЕ: Ключ не похож на JWT токен (должен содержать точки)")
+                
                 self.supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
                 logger.info(f"✅ Supabase клиент успешно инициализирован: {SUPABASE_URL}")
             except Exception as e:
                 logger.error(f"❌ Ошибка при создании Supabase клиента: {e}")
                 logger.error(f"Stack trace:\n{traceback.format_exc()}")
+                
+                # Дополнительная диагностика для ошибки 401
+                error_str = str(e)
+                if "401" in error_str or "Unauthorized" in error_str:
+                    logger.error("\n🚨 КРИТИЧЕСКАЯ ПРОБЛЕМА: Ошибка авторизации 401 Unauthorized")
+                    logger.error("=" * 70)
+                    logger.error("Возможные причины:")
+                    logger.error("  1. Используется ANON key вместо SERVICE_ROLE key")
+                    logger.error("  2. Ключ был сброшен в Supabase, но не обновлен в Render")
+                    logger.error("  3. Ключ содержит опечатку или скопирован не полностью")
+                    logger.error("  4. В ключе есть пробелы в начале/конце (уже исправлено в коде)")
+                    logger.error("\n💡 РЕШЕНИЕ:")
+                    logger.error("  1. Откройте Supabase Dashboard → Settings → API")
+                    logger.error("  2. Найдите 'Project API keys' → скопируйте 'service_role' key")
+                    logger.error("  3. В Render: Environment Variables → SUPABASE_SERVICE_ROLE_KEY")
+                    logger.error("  4. Замените на новый ключ и сохраните")
+                    logger.error("  5. Перезапустите: Manual Deploy → Clear build cache & deploy")
+                    logger.error("=" * 70)
+                
                 self.supabase = None
 
         self.current_strategy = None
@@ -63,11 +97,55 @@ class TradingCore:
             logger.info("✅ Supabase connection test: SUCCESS")
             return True
         except Exception as e:
-            # Это не критическая ошибка - продолжаем работу
-            logger.warning(f"⚠️ Supabase connection test failed: {e}")
-            logger.info("📍 Core will continue, but database operations may fail.")
-            logger.info("💡 Make sure your Supabase tables (strategy_settings, signal_requests, trades) exist and RLS policies allow service_role access.")
-            return False
+            error_str = str(e)
+            
+            # Детальный анализ ошибки
+            if "401" in error_str or "Unauthorized" in error_str:
+                logger.error("❌ Supabase connection test: FAILED (401 Unauthorized)")
+                logger.error("=" * 70)
+                logger.error("🚨 ОШИБКА АВТОРИЗАЦИИ!")
+                logger.error("   Supabase отклоняет ваш ключ авторизации.")
+                logger.error("\n📋 Контрольный список:")
+                logger.error("   ☐ Проверьте, что используется SERVICE_ROLE key (не anon)")
+                logger.error("   ☐ Убедитесь, что ключ скопирован полностью без пробелов")
+                logger.error("   ☐ Проверьте, что ключ не был сброшен в Supabase")
+                logger.error("   ☐ Убедитесь, что переменная называется SUPABASE_SERVICE_ROLE_KEY")
+                logger.error("\n💡 Как получить правильный ключ:")
+                logger.error("   1. Supabase Dashboard → Project Settings → API")
+                logger.error("   2. Раздел 'Project API keys'")
+                logger.error("   3. Скопируйте 'service_role' (секретный ключ, НЕ публичный!)")
+                logger.error("   4. Обновите SUPABASE_SERVICE_ROLE_KEY в Render")
+                logger.error("=" * 70)
+                logger.debug(f"Full error: {e}")
+                logger.debug(f"Stack trace:\n{traceback.format_exc()}")
+                return False
+            elif "404" in error_str or "Not Found" in error_str:
+                logger.info("ℹ️ Function 'version' not found - trying alternative test...")
+                # Пробуем альтернативный способ проверки
+                try:
+                    # Просто проверяем, что можем обратиться к API
+                    test_response = self.supabase.table("_connection_test").select("*").limit(1).execute()
+                    logger.info("✅ Supabase connection test: SUCCESS (alternative method)")
+                    return True
+                except Exception as e2:
+                    error_str2 = str(e2)
+                    if "404" in error_str2 or "not found" in error_str2.lower():
+                        # Таблица не найдена, но мы получили ответ - значит авторизация прошла!
+                        logger.info("✅ Supabase connection test: SUCCESS (table not found, but auth OK)")
+                        return True
+                    elif "401" in error_str2:
+                        logger.error("❌ Alternative test also failed with 401 - key is invalid!")
+                        return False
+                    else:
+                        logger.warning(f"⚠️ Alternative test failed: {e2}")
+                        return False
+            else:
+                # Другая ошибка
+                logger.warning(f"⚠️ Supabase connection test failed: {e}")
+                logger.info("📍 Core will continue, but database operations may fail.")
+                logger.info("💡 Make sure your Supabase tables (strategy_settings, signal_requests, trades) exist and RLS policies allow service_role access.")
+                logger.debug(f"Stack trace:\n{traceback.format_exc()}")
+                return False
 
     async def fetch_strategy(self):
         """Читает активный алгоритм из Supabase (задается Admin Bot)."""
