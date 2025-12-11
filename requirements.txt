@@ -1,7 +1,7 @@
 # trading-core/requirements.txt
 python-dotenv
 httpx
-supabase-py
+supabase
 cryptography
 pandas
 yfinance
