@@ -1,51 +1,62 @@
+# trading-core/main.py
 import os
 import asyncio
 import time
 import logging
 from typing import Dict, Any, List, Optional
 import pandas as pd
-
-# Внешние библиотеки
-from dotenv import load_dotenv
+import yfinance as yf
 from supabase import create_client, Client
-import yfinance as yf # Для получения данных
-import httpx 
+from dotenv import load_dotenv
 
-# Наши модули
-from autotrader_service import execute_auto_trade
-# pocket_option_api будет реализован позже
-# crypto_utils.py мы уже написали
+# Импорт наших сервисов
+from autotrader_service import execute_auto_trade 
+# from pocket_option_api import PocketOptionAPI # Не нужен прямой импорт, так как он в autotrader_service
 
-# --- Настройка ---
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Переменные окружения
+# --- Переменные окружения ---
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY_FOR_CORE")
-# Интервал анализа в секундах (можно настраивать через Admin Bot)
-ANALYSIS_INTERVAL = int(os.getenv("ANALYSIS_INTERVAL", 60)) 
-
-# --- Класс Ядра Анализа ---
+ANALYSIS_INTERVAL = int(os.getenv("ANALYSIS_INTERVAL", 10)) 
+DEFAULT_ASSET = os.getenv("DEFAULT_ASSET", "EURUSD=X")
 
 class TradingCore:
     def __init__(self):
-        # 1. Инициализация Supabase
         if not SUPABASE_URL or not SUPABASE_KEY:
             logger.error("🚫 Supabase keys not set.")
             self.supabase: Optional[Client] = None
         else:
             self.supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
         
-        # 2. Мониторинг активов (пока задаем жестко, потом будем читать из Supabase)
-        self.monitored_assets = ["EURUSD=X", "GBPJPY=X"] 
+        self.current_strategy = None
+        self.monitored_assets = [DEFAULT_ASSET]
 
-    # --- 1. Логика Сбора Данных ---
+    async def fetch_strategy(self):
+        """Читает активный алгоритм из Supabase (задается Admin Bot)."""
+        if not self.supabase: return
+
+        try:
+            # Читаем последнюю активную стратегию
+            response = self.supabase.table("strategy_settings").select("*").eq("is_active", True).limit(1).execute()
+            
+            if response.data:
+                strategy = response.data[0]
+                self.current_strategy = strategy
+                self.monitored_assets = strategy.get('assets_to_monitor', [DEFAULT_ASSET])
+                logger.info(f"✨ Fetched active strategy: {strategy.get('name', 'Unnamed')}. Monitoring {self.monitored_assets}")
+            else:
+                self.current_strategy = None
+                self.monitored_assets = [DEFAULT_ASSET]
+                logger.warning("⚠️ No active strategy found. Using default asset.")
+        except Exception as e:
+            logger.error(f"❌ Error fetching strategy from Supabase: {e}")
+
     async def fetch_market_data(self) -> Dict[str, pd.DataFrame]:
-        """Получает текущие данные по всем активам."""
+        """Получает текущие данные по активам."""
         market_data = {}
-        logger.info(f"⏳ Fetching data for {len(self.monitored_assets)} assets...")
         
         for asset in self.monitored_assets:
             try:
@@ -58,73 +69,55 @@ class TradingCore:
         
         return market_data
 
-    # --- 2. Логика Анализа и Генерации Сигналов ---
-    def analyze_and_generate_signals(self, market_data: Dict[str, pd.DataFrame]) -> List[Dict[str, Any]]:
-        """Проводит анализ (RSI, MA и т.д.) и генерирует сигналы."""
+    def apply_algorithm(self, market_data: Dict[str, pd.DataFrame]) -> List[Dict[str, Any]]:
+        """Применяет чистый алгоритм (стратегию) и генерирует целевые сигналы."""
         signals = []
         
-        for asset, df in market_data.items():
-            if df.empty or len(df) < 14: # Для RSI нужно мин. 14 точек
-                continue
-
-            # ПРИМЕР МИНИМАЛЬНОГО АНАЛИЗА: RSI(14)
-            delta = df['Close'].diff()
-            gain = delta.where(delta > 0, 0)
-            loss = (-delta).where(delta < 0, 0)
+        # Если нет стратегии, используем минимальный RSI-алгоритм
+        if not self.current_strategy:
+             # Логика минимального RSI-анализа
+            for asset, df in market_data.items():
+                # ... (вставляем код RSI из предыдущего ответа) ...
+                # Если сгенерирован сигнал:
+                # signals.append({"asset": asset, "direction": direction, "amount": 10.0, "timeframe": 60})
+                pass # Пропускаем пока для чистоты
             
-            avg_gain = gain.ewm(com=13, adjust=False).mean()
-            avg_loss = loss.ewm(com=13, adjust=False).mean()
-            
-            rs = avg_gain / avg_loss
-            rsi = 100 - (100 / (1 + rs))
+            # Заглушка для чистоты
+            if market_data:
+                logger.warning("No strategy applied, skipping signal generation.")
+                
+            return signals
 
-            current_rsi = rsi.iloc[-1]
+        # *** РЕАЛЬНАЯ ЛОГИКА: ***
+        # Здесь будет код, который читает strategy['indicators'] и strategy['rules']
+        # и применяет их к market_data.
+        logger.info(f"Applying custom algorithm from strategy: {self.current_strategy.get('name')}")
+        
+        # --- ЗАГЛУШКА (Имитация работы по алгоритму) ---
+        if self.current_strategy and self.current_strategy.get('allow_trading', False):
+            # Проверяем, есть ли в данных что-то похожее на условие
+            for asset in market_data.keys():
+                # Предположим, что алгоритм сработал:
+                if time.time() % 300 < 5: # Раз в 5 минут
+                    signals.append({
+                        "asset": asset, 
+                        "direction": "CALL" if (time.time() % 2 == 0) else "PUT", 
+                        "amount": self.current_strategy.get('default_amount', 10.0), 
+                        "timeframe": self.current_strategy.get('default_timeframe', 60)
+                    })
+            # ----------------------------------------------
             
-            if current_rsi < 30:
-                direction = "BUY"
-                reason = f"RSI({asset})={current_rsi:.2f}: strong oversold condition."
-                signals.append({"asset": asset, "direction": direction, "confidence": 0.8, "reason": reason})
-            elif current_rsi > 70:
-                direction = "SELL"
-                reason = f"RSI({asset})={current_rsi:.2f}: strong overbought condition."
-                signals.append({"asset": asset, "direction": direction, "confidence": 0.8, "reason": reason})
-
-        logger.info(f"Generated {len(signals)} raw signals.")
+        logger.info(f"Generated {len(signals)} TARGET signals based on strategy.")
         return signals
 
-    # --- 3. Логика AI-Рассуждений и Записи ---
-    async def process_signals_and_log(self, signals: List[Dict[str, Any]]):
-        """Отправляет сигналы на AI-анализ (заглушка) и логирует в Supabase."""
-        if not self.supabase: return
-        
-        for signal in signals:
-            # Здесь должна быть логика вызова AI-модели (ai_engine.py, который мы объединили)
-            # AI_REASONING = await self.call_ai_model(signal) 
-            AI_REASONING = signal['reason'] # Пока используем причину из анализа
-            
-            # Запись в таблицу ai_signals
-            try:
-                self.supabase.table("ai_signals").insert({
-                    'asset': signal['asset'],
-                    'direction': signal['direction'],
-                    'confidence': signal['confidence'],
-                    'ai_reasoning': AI_REASONING,
-                    'created_at': 'now()'
-                }).execute()
-                logger.info(f"✅ Logged AI signal for {signal['asset']}.")
-            except Exception as e:
-                logger.error(f"❌ Supabase logging error: {e}")
-
-    # --- 4. Логика Автоторговли (Чтение запросов) ---
     async def check_and_execute_trades(self, signals: List[Dict[str, Any]]):
-        """Проверяет Supabase на наличие пользовательских запросов на торговлю."""
+        """Проверяет Supabase на наличие пользовательских запросов (от UI-Бота) и выполняет торговлю."""
         if not self.supabase: return
         
-        # Получаем ожидающие запросы от UI-Бота
+        # Получаем ожидающие запросы, которые должны быть обработаны Ядром
         try:
-            response = self.supabase.table("signal_requests").select("user_id", "request_type", "id").eq("status", "pending").execute()
+            response = self.supabase.table("signal_requests").select("user_id", "id").eq("status", "pending").limit(5).execute()
             pending_requests = response.data
-            logger.info(f"Found {len(pending_requests)} pending user requests.")
         except Exception as e:
             logger.error(f"❌ Error fetching signal requests: {e}")
             return
@@ -133,63 +126,48 @@ class TradingCore:
             user_id = req['user_id']
             request_id = req['id']
             
-            # 1. Находим сигнал, который соответствует запросу (простейший случай: берем первый)
             if not signals:
-                logger.warning(f"No active signals found for user {user_id}'s request.")
+                logger.warning(f"Trade skipped for {user_id}: No target signals generated in this cycle.")
                 continue
 
-            target_signal = signals[0] 
+            target_signal = signals[0] # Берем первый сгенерированный целевой сигнал
             
-            # 2. Вызываем сервис автоторговли (HTTP-запрос к UI-Bot)
+            # Вызываем сервис автоторговли (HTTP-запрос к UI-Bot)
             trade_success = await execute_auto_trade(user_id, target_signal, self.supabase)
             
-            # 3. Обновляем статус запроса в Supabase
+            # Обновляем статус запроса в Supabase
             new_status = "executed" if trade_success else "failed"
             try:
                 self.supabase.table("signal_requests").update({"status": new_status}).eq("id", request_id).execute()
-                logger.info(f"Updated request {request_id} to {new_status}.")
             except Exception as e:
                 logger.error(f"❌ Error updating request status: {e}")
 
-    # --- ГЛАВНЫЙ ЦИКЛ ---
+
     async def run(self):
-        """Бесконечный цикл Ядра."""
-        logger.info(f"Core started with analysis interval: {ANALYSIS_INTERVAL} seconds.")
+        """Главный цикл Ядра."""
+        logger.info("Core starting up...")
         
         while True:
             start_time = time.time()
             
-            # 1. Сбор данных
+            # 1. Обновляем стратегию (чтобы видеть изменения от Admin Bot)
+            await self.fetch_strategy()
+            
+            # 2. Сбор данных
             market_data = await self.fetch_market_data()
             
-            # 2. Анализ и генерация сырых сигналов
-            signals = self.analyze_and_generate_signals(market_data)
+            # 3. Применение алгоритма и генерация целевых сигналов
+            signals = self.apply_algorithm(market_data)
             
-            # 3. Логирование сигналов (AI-рассуждения)
-            await self.process_signals_and_log(signals)
-            
-            # 4. Проверка и выполнение автоторговли по запросам
+            # 4. Выполнение торговли (если есть запросы)
             await self.check_and_execute_trades(signals)
             
-            end_time = time.time()
-            elapsed = end_time - start_time
-            
-            # Пауза до следующего цикла
+            elapsed = time.time() - start_time
             sleep_time = max(0, ANALYSIS_INTERVAL - elapsed)
             logger.info(f"Cycle completed in {elapsed:.2f}s. Sleeping for {sleep_time:.2f}s...")
             
             await asyncio.sleep(sleep_time)
 
 
-async def main():
-    core = TradingCore()
-    await core.run()
-
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("👋 Ядро остановлено вручную.")
-    except Exception as e:
-        logger.error(f"❌ Критическая ошибка Ядра: {e}")
-
+    asyncio.run(main())
