@@ -18,18 +18,31 @@ logger = logging.getLogger(__name__)
 
 # --- Переменные окружения ---
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY_FOR_CORE")
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 ANALYSIS_INTERVAL = int(os.getenv("ANALYSIS_INTERVAL", 10))
 DEFAULT_ASSET = os.getenv("DEFAULT_ASSET", "EURUSD=X")
 
 
 class TradingCore:
     def __init__(self):
-        if not SUPABASE_URL or not SUPABASE_KEY:
-            logger.error("🚫 Supabase keys not set.")
+        # Проверка всех критических переменных окружения
+        missing_vars = []
+        if not SUPABASE_URL:
+            missing_vars.append("SUPABASE_URL")
+        if not SUPABASE_KEY:
+            missing_vars.append("SUPABASE_SERVICE_ROLE_KEY")
+        
+        if missing_vars:
+            logger.error(f"🚫 Критические переменные окружения не установлены: {', '.join(missing_vars)}")
+            logger.error("Пожалуйста, установите их в настройках Render Environment Variables.")
             self.supabase: Optional[Client] = None
         else:
-            self.supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+            try:
+                self.supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+                logger.info(f"✅ Supabase клиент успешно инициализирован: {SUPABASE_URL}")
+            except Exception as e:
+                logger.error(f"❌ Ошибка при создании Supabase клиента: {e}")
+                self.supabase = None
 
         self.current_strategy = None
         self.monitored_assets = [DEFAULT_ASSET]
@@ -232,5 +245,23 @@ class TradingCore:
 
 
 if __name__ == "__main__":
+    logger.info("=" * 60)
+    logger.info("🚀 Trading Core Starting...")
+    logger.info("=" * 60)
+    
+    # Проверка дополнительных переменных окружения (для информации)
+    env_vars_status = {
+        "SUPABASE_URL": "✅" if SUPABASE_URL else "❌",
+        "SUPABASE_SERVICE_ROLE_KEY": "✅" if SUPABASE_KEY else "❌",
+        "ANALYSIS_INTERVAL": f"✅ ({ANALYSIS_INTERVAL}s)",
+        "DEFAULT_ASSET": f"✅ ({DEFAULT_ASSET})",
+    }
+    
+    logger.info("Статус переменных окружения:")
+    for var, status in env_vars_status.items():
+        logger.info(f"  {var}: {status}")
+    
+    logger.info("=" * 60)
+    
     core = TradingCore()
     asyncio.run(core.run())
